@@ -12,6 +12,7 @@ from ghosty_console.config import PROXY_SCRIPTS_DIR
 
 
 def _all_shell_scripts() -> list:
+    """Finds every .sh file anywhere under proxy-scripts/, recursively."""
     return sorted(PROXY_SCRIPTS_DIR.rglob("*.sh"))
 
 
@@ -19,5 +20,8 @@ def _all_shell_scripts() -> list:
     "script", _all_shell_scripts(), ids=lambda p: str(p.relative_to(PROXY_SCRIPTS_DIR))
 )
 def test_shell_script_syntax(script):
+    """`bash -n <script>` parses the script without executing it - catches
+    quoting/syntax mistakes (like the apostrophe-in-${VAR:?msg} bug found
+    during development) before they ever reach a real VPS."""
     result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

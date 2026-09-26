@@ -24,10 +24,14 @@ from tests.sample_client_info import SHADOWSOCKS_XRAY_INFO, XRAY_REALITY_INFO
 
 
 def _remote_info_path(provider: str) -> str:
+    """Builds the remote client-info.json path a fake SSH session should serve for this provider."""
     return f"/opt/proxy/{provider}/client-info.json"
 
 
 def test_deploy_syncs_client_info_locally(isolated_config, monkeypatch):
+    """deploy() runs install.sh over (fake) SSH, then pulls the resulting
+    client-info.json down into the proxy's local current/ directory and
+    registers the proxy in list_proxies()."""
     profile = ServerProfile(name="node-a", host="203.0.113.7")
     add_server(profile)
 
@@ -43,6 +47,8 @@ def test_deploy_syncs_client_info_locally(isolated_config, monkeypatch):
 
 
 def test_deploy_passes_proxy_port_to_install_command(isolated_config, monkeypatch):
+    """When a proxy_port is given, deploy() prefixes the remote install.sh
+    invocation with PROXY_PORT=<port>, so a first install picks it up."""
     profile = ServerProfile(name="node-b", host="203.0.113.7")
     add_server(profile)
 
@@ -83,6 +89,9 @@ def test_deploy_redeploy_omits_proxy_port(isolated_config, monkeypatch):
 
 
 def test_discover_finds_multiple_providers_on_one_server(isolated_config, monkeypatch):
+    """discover() finds every /opt/proxy/<provider>/client-info.json on the
+    (fake) server, syncs each one into this server's local proxies/, and
+    returns one result dict per provider found."""
     profile = ServerProfile(name="myvps", host="203.0.113.7")
     add_server(profile)
 
@@ -106,6 +115,9 @@ def test_discover_finds_multiple_providers_on_one_server(isolated_config, monkey
 
 
 def test_discover_reports_when_nothing_found(isolated_config, monkeypatch):
+    """discover() returns an empty list and logs a "nothing deployed" line
+    when the (fake) server has no /opt/proxy/*/client-info.json at all -
+    and leaves the server's local proxies list empty too."""
     profile = ServerProfile(name="empty-vps", host="203.0.113.9")
     add_server(profile)
 
@@ -120,6 +132,10 @@ def test_discover_reports_when_nothing_found(isolated_config, monkeypatch):
 
 
 def test_regenerate_config_uses_local_cache_without_ssh(isolated_config, monkeypatch):
+    """When a local client-info.json already exists, regenerate_config()
+    rebuilds the client profile from it directly and never even
+    constructs an SSHSession (asserted via a session class that raises
+    if instantiated)."""
     profile = ServerProfile(name="cached", host="203.0.113.55")
     add_server(profile)
     current = profile.proxy_current_dir("shadowsocks-xray")
@@ -140,6 +156,9 @@ def test_regenerate_config_uses_local_cache_without_ssh(isolated_config, monkeyp
 
 
 def test_regenerate_config_falls_back_to_ssh_when_cache_missing(isolated_config, monkeypatch):
+    """When there's no local client-info.json (e.g. it was deleted),
+    regenerate_config() connects over (fake) SSH to fetch it fresh from
+    the server before rebuilding the client profile."""
     profile = ServerProfile(name="lost-config", host="203.0.113.55")
     add_server(profile)
     assert not (profile.proxy_current_dir("shadowsocks-xray") / "client-info.json").exists()

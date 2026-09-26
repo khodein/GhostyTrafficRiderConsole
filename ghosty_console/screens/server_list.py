@@ -12,6 +12,9 @@ from ghosty_console.screens.server_dashboard import ServerDashboardScreen
 
 
 class ServerListScreen(Screen):
+    """Top-level screen: every known server, one row each. The app's
+    starting screen (see GhostyApp.on_mount)."""
+
     BINDINGS = [
         Binding("a", "add_server", "Add server"),
         Binding("d", "delete_server", "Delete selected"),
@@ -20,11 +23,13 @@ class ServerListScreen(Screen):
     ]
 
     def compose(self) -> ComposeResult:
+        """Builds the layout: header, the servers table, footer (key bindings hint bar)."""
         yield Header()
         yield DataTable(id="servers")
         yield Footer()
 
     def on_mount(self) -> None:
+        """Sets up the table's columns and populates its first rows."""
         self.title = "Ghosty Traffic Rider Console"
         table = self.query_one(DataTable)
         table.cursor_type = "row"
@@ -32,11 +37,12 @@ class ServerListScreen(Screen):
         self.action_refresh_servers()
 
     def on_screen_resume(self) -> None:
-        # Returning from a server's dashboard - refresh in case anything
-        # changed (e.g. Delete server was used there).
+        """Refreshes the table when returning here from a server's
+        dashboard (e.g. after Delete server was used there)."""
         self.action_refresh_servers()
 
     def action_refresh_servers(self) -> None:
+        """Reloads server profiles from disk and redraws the table."""
         table = self.query_one(DataTable)
         table.clear()
         for profile in load_servers():
@@ -45,16 +51,20 @@ class ServerListScreen(Screen):
 
     @work()
     async def action_add_server(self) -> None:
+        """Opens the Add server modal; on success, saves the new profile,
+        refreshes the table, and jumps straight into its dashboard with
+        auto_discover=True so its already-deployed proxies (if any) show
+        up immediately without a manual Discover click."""
         profile = await self.app.push_screen_wait(AddServerScreen())
         if profile is not None:
             add_server(profile)
             self.action_refresh_servers()
-            # Jump straight into the new server and scan it for anything
-            # already deployed there, instead of making the user open it
-            # and press Discover manually every time.
             self.app.push_screen(ServerDashboardScreen(profile, auto_discover=True))
 
     def action_delete_server(self) -> None:
+        """Deletes the currently selected server (and all its local proxy
+        state) after confirming a row is selected. Purely local - the
+        actual VPS is left untouched."""
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -63,6 +73,7 @@ class ServerListScreen(Screen):
         self.action_refresh_servers()
 
     def action_open_server(self) -> None:
+        """Opens the dashboard for the currently selected server (keyboard path)."""
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -73,6 +84,12 @@ class ServerListScreen(Screen):
             self.app.push_screen(ServerDashboardScreen(profile))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Opens the dashboard for the clicked/selected server (mouse/Enter path).
+
+        Args:
+            event: The row-selection message; event.row_key.value is the
+                server's name (used as the table's row key).
+        """
         name = str(event.row_key.value)
         profile = next((p for p in load_servers() if p.name == name), None)
         if profile is not None:

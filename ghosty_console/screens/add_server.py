@@ -14,7 +14,11 @@ class AddServerScreen(ModalScreen[Optional[ServerProfile]]):
     """Just the SSH connection details - no provider/port here. What's
     already deployed there gets discovered right after saving (see
     ServerListScreen.action_add_server), and new proxies are added from
-    inside the server's dashboard via Deploy new proxy."""
+    inside the server's dashboard via Deploy new proxy.
+
+    Dismisses with:
+        A new ServerProfile built from the form, or None if cancelled.
+    """
 
     DEFAULT_CSS = """
     AddServerScreen {
@@ -32,6 +36,7 @@ class AddServerScreen(ModalScreen[Optional[ServerProfile]]):
     """
 
     def compose(self) -> ComposeResult:
+        """Builds the form: name/host/user/port/key_path inputs, Save/Cancel buttons."""
         with Vertical(id="dialog"):
             yield Label("Add server")
             yield Input(placeholder="name (e.g. nl-1)", id="name")
@@ -44,6 +49,14 @@ class AddServerScreen(ModalScreen[Optional[ServerProfile]]):
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Validates the form and dismisses with a ServerProfile on Save,
+        or with None on Cancel (or on a validation failure, after ringing
+        the terminal bell).
+
+        Args:
+            event: The button-press message; event.button.id identifies
+                which button was clicked ("save" or "cancel").
+        """
         if event.button.id != "save":
             self.dismiss(None)
             return

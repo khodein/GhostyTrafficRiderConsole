@@ -24,6 +24,9 @@ from ghosty_console.config import (
 
 
 def test_add_load_remove_roundtrip(isolated_config):
+    """add_server() persists a profile and creates its state_dir;
+    load_servers() reads it back; remove_server() deletes both the
+    registry entry and the state_dir from disk."""
     profile = ServerProfile(name="node-a", host="203.0.113.10")
     add_server(profile)
 
@@ -37,6 +40,8 @@ def test_add_load_remove_roundtrip(isolated_config):
 
 
 def test_add_server_replaces_same_name(isolated_config):
+    """Calling add_server() twice with the same profile name overwrites
+    the first entry instead of creating a duplicate."""
     add_server(ServerProfile(name="node-a", host="203.0.113.10"))
     add_server(ServerProfile(name="node-a", host="203.0.113.99"))
 
@@ -46,6 +51,9 @@ def test_add_server_replaces_same_name(isolated_config):
 
 
 def test_list_proxies_and_remove_proxy(isolated_config):
+    """list_proxies() reflects whatever proxy subfolders exist under a
+    server's proxies/ dir; remove_proxy() deletes just that proxy's state
+    without touching the rest of the server's local data."""
     profile = ServerProfile(name="myvps", host="203.0.113.7")
     add_server(profile)
     assert list_proxies(profile) == []

@@ -12,8 +12,13 @@ from ghosty_console.config import list_providers
 
 class DeployProxyScreen(ModalScreen[Optional[Tuple[str, str]]]):
     """Picks a provider + optional port for a new proxy on an already-known
-    server. Dismisses with (provider, proxy_port) - proxy_port empty means
-    "let install.sh pick a random port"."""
+    server.
+
+    Dismisses with:
+        A (provider, proxy_port) tuple - proxy_port is an empty string if
+        left blank, meaning "let install.sh pick a random port" - or None
+        if cancelled.
+    """
 
     DEFAULT_CSS = """
     DeployProxyScreen {
@@ -31,6 +36,7 @@ class DeployProxyScreen(ModalScreen[Optional[Tuple[str, str]]]):
     """
 
     def compose(self) -> ComposeResult:
+        """Builds the form: provider select, optional-port input, Deploy/Cancel buttons."""
         providers = list_providers() or ["shadowsocks-xray"]
         with Vertical(id="dialog"):
             yield Label("Deploy a new proxy on this server")
@@ -43,6 +49,14 @@ class DeployProxyScreen(ModalScreen[Optional[Tuple[str, str]]]):
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Validates the port field and dismisses with (provider, proxy_port)
+        on Deploy, or with None on Cancel (or on a validation failure,
+        after ringing the terminal bell).
+
+        Args:
+            event: The button-press message; event.button.id identifies
+                which button was clicked ("deploy" or "cancel").
+        """
         if event.button.id != "deploy":
             self.dismiss(None)
             return

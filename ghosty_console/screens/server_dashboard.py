@@ -17,7 +17,14 @@ from ghosty_console.screens.proxy_detail import ProxyDetailScreen
 class ServerDashboardScreen(Screen):
     """One server: connection details up top, a table of every proxy
     known to be deployed on it, and actions to discover more, deploy a
-    new one, or delete the whole server profile."""
+    new one, or delete the whole server profile.
+
+    Args:
+        profile: The server this dashboard is for.
+        auto_discover: If True, runs Discover automatically as soon as the
+            screen mounts (used right after adding a new server, so its
+            already-deployed proxies show up without a manual click).
+    """
 
     BINDINGS = [
         Binding("escape", "back", "Back"),
@@ -31,6 +38,7 @@ class ServerDashboardScreen(Screen):
         self._auto_discover = auto_discover
 
     def compose(self) -> ComposeResult:
+        """Builds the layout: header, action buttons, proxies table, log panel, footer."""
         yield Header()
         with Horizontal(id="actions"):
             yield Button("Discover", id="discover", variant="primary")
@@ -42,6 +50,8 @@ class ServerDashboardScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Sets up the proxies table, populates it, and - if auto_discover
+        was requested - kicks off Discover right away."""
         self.title = self.profile.name
         self.sub_title = f"{self.profile.user}@{self.profile.host}:{self.profile.port}"
         table = self.query_one(DataTable)
@@ -54,12 +64,20 @@ class ServerDashboardScreen(Screen):
             self._start_password_flow(self.run_discover)
 
     def on_screen_resume(self) -> None:
+        """Refreshes the proxies table when returning here from a proxy's
+        detail screen (e.g. after Delete proxy or a fresh Deploy there)."""
         self.action_refresh_proxies()
 
     def write_log(self, line: str) -> None:
+        """Appends one line to the on-screen log panel.
+
+        Args:
+            line: Text to append.
+        """
         self.query_one("#log", RichLog).write(line)
 
     def action_refresh_proxies(self) -> None:
+        """Reloads the list of locally-known proxies for this server and redraws the table."""
         table = self.query_one(DataTable)
         table.clear()
         for provider in list_proxies(self.profile):
@@ -69,9 +87,11 @@ class ServerDashboardScreen(Screen):
             table.add_row(provider, port, extra, key=provider)
 
     def action_back(self) -> None:
+        """Returns to the server list."""
         self.app.pop_screen()
 
     def action_open_proxy(self) -> None:
+        """Opens the detail screen for the currently selected proxy row (keyboard path)."""
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -79,9 +99,22 @@ class ServerDashboardScreen(Screen):
         self.app.push_screen(ProxyDetailScreen(self.profile, str(row_key.value)))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Opens the detail screen for the clicked/selected proxy row (mouse/Enter path).
+
+        Args:
+            event: The row-selection message; event.row_key.value is the
+                provider name (used as the table's row key).
+        """
         self.app.push_screen(ProxyDetailScreen(self.profile, str(event.row_key.value)))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dispatches the action bar's buttons: Back, Delete server,
+        Discover, Deploy new proxy.
+
+        Args:
+            event: The button-press message; event.button.id identifies
+                which button was clicked.
+        """
         button_id = event.button.id
 
         if button_id == "back":
@@ -99,6 +132,12 @@ class ServerDashboardScreen(Screen):
             return
 
     async def _maybe_prompt_password(self) -> str | None:
+        """Shows the password modal unless this server uses an SSH key.
+
+        Returns:
+            The entered password, None if the user cancelled the prompt,
+            or None immediately (without prompting) if a key is configured.
+        """
         if self.profile.uses_key:
             return None
         return await self.app.push_screen_wait(
@@ -107,6 +146,13 @@ class ServerDashboardScreen(Screen):
 
     @work()
     async def _start_password_flow(self, worker_fn) -> None:
+        """Prompts for a password if needed, then hands off to a worker
+        function that performs the actual SSH action.
+
+        Args:
+            worker_fn: Callable taking one argument (the password, or None
+                if a key is configured) - e.g. self.run_discover.
+        """
         password = await self._maybe_prompt_password()
         if password is None and not self.profile.uses_key:
             self.write_log("[cancelled - no password entered]")
@@ -115,6 +161,9 @@ class ServerDashboardScreen(Screen):
 
     @work()
     async def _start_deploy_new_flow(self) -> None:
+        """Shows the provider/port picker, then prompts for a password if
+        needed, then starts the deploy worker. Cancelling either step
+        aborts cleanly with no side effects."""
         choice = await self.app.push_screen_wait(DeployProxyScreen())
         if choice is None:
             return
@@ -127,6 +176,14 @@ class ServerDashboardScreen(Screen):
 
     @work(thread=True, exclusive=True, group="ssh")
     def run_deploy(self, provider: str, proxy_port: str, password: str | None) -> None:
+        """Background worker: installs a new proxy on this server and
+        refreshes the table on success.
+
+        Args:
+            provider: Provider to install, e.g. "shadowsocks-xray".
+            proxy_port: Requested port, or empty string for a random one.
+            password: SSH password, or None if the server uses a key.
+        """
         log = lambda line: self.app.call_from_thread(self.write_log, line)
         try:
             info = deploy.deploy(self.profile, provider, proxy_port, password, log)
@@ -138,6 +195,12 @@ class ServerDashboardScreen(Screen):
 
     @work(thread=True, exclusive=True, group="ssh")
     def run_discover(self, password: str | None) -> None:
+        """Background worker: scans the server for deployed proxies and
+        refreshes the table with whatever was found.
+
+        Args:
+            password: SSH password, or None if the server uses a key.
+        """
         log = lambda line: self.app.call_from_thread(self.write_log, line)
         try:
             found = deploy.discover(self.profile, password, log)

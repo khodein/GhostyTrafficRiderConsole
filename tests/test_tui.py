@@ -118,6 +118,9 @@ def test_adding_a_server_with_a_key_shows_all_its_proxies_in_the_dashboard(
 
 
 def test_open_proxy_from_dashboard_and_back(isolated_config, monkeypatch):
+    """Selecting a row in the dashboard's proxies table (via Enter, once
+    the table has focus) opens ProxyDetailScreen for that provider; escape
+    returns to the dashboard."""
     remote_files = {"/opt/proxy/shadowsocks-xray/client-info.json": SHADOWSOCKS_XRAY_INFO}
     monkeypatch.setattr(deploy_mod, "SSHSession", make_fake_ssh_session(remote_files))
     add_server(ServerProfile(name="node-a", host="203.0.113.10", key_path="/fake/key"))
@@ -151,6 +154,9 @@ def test_open_proxy_from_dashboard_and_back(isolated_config, monkeypatch):
 
 
 def test_verify_without_deployment_reports_nothing_to_verify(isolated_config):
+    """Clicking Verify on a proxy that the dashboard knows about (folder
+    exists) but that has no local client-info.json (e.g. after Remove
+    config) logs "no deployment yet" instead of attempting verification."""
     # A proxy the dashboard knows about (e.g. from a past Discover/Deploy)
     # but whose client-info.json is missing locally right now.
     profile = ServerProfile(name="node-a", host="203.0.113.10", key_path="/fake/key")
@@ -181,6 +187,10 @@ def test_verify_without_deployment_reports_nothing_to_verify(isolated_config):
 
 
 def test_deploy_new_proxy_without_key_prompts_for_password_and_cancel_is_clean(isolated_config):
+    """Deploy new proxy on a server with no ssh key configured shows the
+    provider/port picker, then a password prompt; cancelling the password
+    prompt aborts cleanly and logs a "cancelled" line, with no crash and
+    no attempted SSH connection."""
     add_server(ServerProfile(name="node-a", host="203.0.113.10"))
 
     async def scenario():
