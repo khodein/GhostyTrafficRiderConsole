@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Deploys Xray-core (VLESS + TCP + Reality) on a fresh Ubuntu 22.04/24.04
+# x86_64 VPS. Adapted from AmneziaVPN's server_scripts/xray container
+# (Dockerfile/start.sh, uploaded alongside this script) - the server-side
+# inbound config (server.json) and key generation are our own, since
+# Amnezia's desktop app builds those client-side in C++ and doesn't ship
+# them as shell scripts.
+#
+# Reality needs no certificate of its own: unauthenticated probes get
+# transparently proxied to the real $XRAY_SITE_NAME, so this provider has
+# no certbot/renewal story (unlike shadowsocks-xray).
+#
+# Usage: SERVER_IP=1.2.3.4 [PROXY_PORT=443] [XRAY_SITE_NAME=www.microsoft.com] ./install.sh
+# PROXY_PORT is only consulted on the very first install; once proxy.env
+# exists the port is fixed until the config is removed and reinstalled.
+# Note: Reality's camouflage works best on 443 (looks like normal HTTPS) -
+# a random high port still works, but is easier for DPI to flag as unusual.
+set -euo pipefail
+
+: "${SERVER_IP:?Set SERVER_IP to the VPS public IPv4 address}"
+
+PROVIDER="xray-reality"
+PROXY_DIR="/opt/proxy/${PROVIDER}"
+BUILD_DIR="${PROXY_DIR}/build"
+ENV_FILE="${PROXY_DIR}/proxy.env"
+IMAGE_NAME="xray-reality"
+CONTAINER_NAME="xray-reality"
+
+log() { printf '\n>>> %s\n' "$1"; }
+
+log "Installing packages"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y ufw fail2ban curl openssl
+
+if ! command -v docker >/dev/null 2>&1; then
+  curl -fsSL https://get.docker.com | sh
+fi
+
+mkdir -p "${PROXY_DIR}" "${BUILD_DIR}"
+cp "$(dirname "$0")/Dockerfile" "$(dirname "$0")/start.sh" "${BUILD_DIR}/"
+
+log "Generating (or reusing) Reality parameters"
+if [[ -f "${ENV_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+else
+  XRAY_PORT="${PROXY_PORT:-$(( (RANDOM % 50000) + 10000 ))}"
+  XRAY_SITE="${XRAY_SITE_NAME:-www.microsoft.com}"
+  cat > "${ENV_FILE}" <<EOF
+XRAY_PORT=${XRAY_PORT}
+XRAY_SITE=${XRAY_SITE}
+EOF
+fi
+chmod 600 "${ENV_FILE}"
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+
+log "Building the Xray-core image"
+docker build -t "${IMAGE_NAME}:latest" "${BUILD_DIR}"
+
+if [[ ! -f "${ENV_FILE}.keys" ]]; then
+  log "Generating client id, keypair and short id (one-time)"
+  XRAY_CLIENT_ID=$(docker run --rm "${IMAGE_NAME}:latest" xray uuid)
+  XRAY_SHORT_ID=$(openssl rand -hex 8)
+
+  KEYPAIR=$(docker run --rm "${IMAGE_NAME}:latest" xray x25519)
+  XRAY_PRIVATE_KEY=$(printf '%s\n' "${KEYPAIR}" | sed -n 's/.*[Pp]rivate[ ]*[Kk]ey:[[:space:]]*//p' | head -1 | tr -d ' ')
+  XRAY_PUBLIC_KEY=$(printf '%s\n' "${KEYPAIR}" | sed -n 's/.*(PublicKey):[[:space:]]*//p' | head -1 | tr -d ' ')
+  if [[ -z "${XRAY_PUBLIC_KEY}" ]]; then
+    XRAY_PUBLIC_KEY=$(printf '%s\n' "${KEYPAIR}" | sed -n 's/.*[Pp]ublic[ ]*[Kk]ey:[[:space:]]*//p' | head -1 | tr -d ' ')
+  fi
+
+  cat > "${ENV_FILE}.keys" <<EOF
+XRAY_CLIENT_ID=${XRAY_CLIENT_ID}
+XRAY_SHORT_ID=${XRAY_SHORT_ID}
+XRAY_PRIVATE_KEY=${XRAY_PRIVATE_KEY}
+XRAY_PUBLIC_KEY=${XRAY_PUBLIC_KEY}
+EOF
+  chmod 600 "${ENV_FILE}.keys"
+else
+  log "Reusing existing client id / keypair"
+fi
+# shellcheck disable=SC1090
+source "${ENV_FILE}.keys"
+
+log "Writing Xray server inbound config (VLESS + TCP + Reality)"
+cat > "${PROXY_DIR}/server.json" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": ${XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [ { "id": "${XRAY_CLIENT_ID}", "flow": "xtls-rprx-vision" } ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${XRAY_SITE}:443",
+          "xver": 0,
+          "serverNames": ["${XRAY_SITE}"],
+          "privateKey": "${XRAY_PRIVATE_KEY}",
+          "shortIds": ["${XRAY_SHORT_ID}"]
+        }
+      }
+    }
+  ],
+  "outbounds": [ { "protocol": "freedom" } ]
+}
+EOF
+
+log "Configuring UFW"
+ufw allow OpenSSH
+ufw allow "${XRAY_PORT}"/tcp
+ufw allow "${XRAY_PORT}"/udp
+ufw --force enable
+
+log "Enabling fail2ban for sshd"
+systemctl enable --now fail2ban
+
+log "(Re)starting the Xray-core container"
+docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+docker run -d \
+  --privileged \
+  --cap-add=NET_ADMIN \
+  --restart unless-stopped \
+  -p "${XRAY_PORT}:${XRAY_PORT}/tcp" \
+  -p "${XRAY_PORT}:${XRAY_PORT}/udp" \
+  -e "XRAY_SERVER_PORT=${XRAY_PORT}" \
+  -v "${PROXY_DIR}/server.json:/opt/amnezia/xray/server.json:ro" \
+  --name "${CONTAINER_NAME}" "${IMAGE_NAME}:latest"
+
+cat > "${PROXY_DIR}/client-info.json" <<EOF
+{
+  "provider": "${PROVIDER}",
+  "ip": "${SERVER_IP}",
+  "port": ${XRAY_PORT},
+  "uuid": "${XRAY_CLIENT_ID}",
+  "public_key": "${XRAY_PUBLIC_KEY}",
+  "short_id": "${XRAY_SHORT_ID}",
+  "site_name": "${XRAY_SITE}",
+  "flow": "xtls-rprx-vision",
+  "fingerprint": "chrome"
+}
+EOF
+chmod 600 "${PROXY_DIR}/client-info.json"
+
+log "Setup report"
+cat <<EOF
+Protocol         : VLESS + TCP + Reality (Xray-core ${IMAGE_NAME})
+Port             : ${XRAY_PORT}
+Camouflage site  : ${XRAY_SITE} (Reality dest - no certificate of our own, nothing to renew)
+Client info      : ${PROXY_DIR}/client-info.json (fetch this file to generate the client profile)
+EOF

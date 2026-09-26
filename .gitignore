@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Machine-local Claude Code permission settings - not meant to be shared.
+.claude/
+
+# Real deployed proxy profiles (IPs, passwords, keys) - never publish these.
+proxy-scripts/output/
+
+# Defensive: never commit key material even if it ends up in the tree by mistake.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.env

@@ -1,0 +1,86 @@
+mode: rule
+log-level: info
+find-process-mode: always
+
+dns:
+  enable: true
+  enhanced-mode: redir-host
+  nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+
+proxies:
+  - name: "Мой Сервер"
+    type: vless
+    server: __SERVER_IP__
+    port: __SERVER_PORT__
+    uuid: __CLIENT_UUID__
+    network: tcp
+    tls: true
+    udp: false
+    flow: __FLOW__
+    servername: __SITE_NAME__
+    client-fingerprint: __FINGERPRINT__
+    reality-opts:
+      public-key: __PUBLIC_KEY__
+      short-id: __SHORT_ID__
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Мой Сервер"
+      - DIRECT
+
+rules:
+  # ====== Блокировка QUIC (UDP/443) для проксируемых агентов ======
+  # Узел "Мой Сервер" (VLESS/TCP/Reality) не поддерживает UDP (udp: false),
+  # поэтому QUIC утекал бы напрямую (DIRECT). Роняем UDP:443 у этих процессов -
+  # приложения откатываются на HTTP/2 поверх TCP, а TCP уже идёт через PROXY.
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Claude)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Codex)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Gemini)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,OpenCode)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Antigravity)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Hermes)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME-REGEX,Telegram)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME,firefox)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME,Android Studio)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME,JetBrains Toolbox)),REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443),(PROCESS-NAME,locationd)),REJECT
+
+  - PROCESS-NAME,Gemini,PROXY
+  - PROCESS-NAME,Telegram,PROXY
+  - PROCESS-NAME,Claude,PROXY
+  - PROCESS-NAME,Claude Helper,PROXY
+  - PROCESS-NAME,Codex,PROXY
+  - PROCESS-NAME,Codex (Service),PROXY
+  - PROCESS-NAME,Android Studio,PROXY
+  - PROCESS-NAME,OpenCode,PROXY
+  - PROCESS-NAME,OpenCode Helper,PROXY
+  - PROCESS-NAME,OpenCode Helper (Renderer),PROXY
+  - PROCESS-NAME,firefox,PROXY
+  - PROCESS-NAME,JetBrains Toolbox,PROXY
+  - PROCESS-NAME,Antigravity,PROXY
+  - PROCESS-NAME,Antigravity IDE,PROXY
+  - PROCESS-NAME,Antigravity Helper,PROXY
+  - PROCESS-NAME,Antigravity IDE Helper,PROXY
+  - PROCESS-NAME,Antigravity IDE Helper (Plugin),PROXY
+  - PROCESS-NAME-REGEX,Antigravity Helper.*,PROXY
+  - PROCESS-NAME-REGEX,Antigravity IDE Helper.*,PROXY
+  - PROCESS-NAME-REGEX,.*Antigravity.*,PROXY
+  - PROCESS-NAME,agy,PROXY
+  - PROCESS-NAME,language_server,PROXY
+  - PROCESS-NAME,trustd,PROXY
+  - PROCESS-NAME,Hermes,PROXY
+  - PROCESS-NAME,Hermes Helper,PROXY
+  - PROCESS-NAME,locationd,PROXY
+  - DOMAIN-SUFFIX,api.telegram.org,PROXY
+  - DOMAIN-SUFFIX,telegram.org,PROXY
+  - DOMAIN-SUFFIX,api.anthropic.com,PROXY
+  - DOMAIN-SUFFIX,api.openai.com,PROXY
+  - DOMAIN-SUFFIX,api.deepseek.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,openai.com,PROXY
+
+  - MATCH,DIRECT
