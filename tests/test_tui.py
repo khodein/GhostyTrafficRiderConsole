@@ -215,3 +215,58 @@ def test_deploy_new_proxy_without_key_prompts_for_password_and_cancel_is_clean(i
             assert any("cancelled" in line for line in log_lines)
 
     asyncio.run(scenario())
+
+
+def test_device_and_rollback_pickers_dismiss_with_the_selected_name(isolated_config):
+    """Choosing a row in a picker returns that row's name (regression: reading
+    the name back from the row's Label broke on newer Textual versions)."""
+    from ghosty_console.screens.device_picker import DevicePickerScreen
+    from ghosty_console.screens.rollback_picker import RollbackPickerScreen
+
+    async def scenario():
+        app = GhostyApp()
+        async with app.run_test(size=(100, 50)) as pilot:
+            await pilot.pause()
+            chosen = []
+            app.push_screen(DevicePickerScreen(["default", "Мой iPhone"]), chosen.append)
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            app.push_screen(RollbackPickerScreen(["20261009T000000Z"]), chosen.append)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert chosen == ["Мой iPhone", "20261009T000000Z"]
+
+    asyncio.run(scenario())
+
+
+def test_users_window_lists_every_user_and_enter_copies_the_link(isolated_config, monkeypatch):
+    """The Devices window shows all users; Enter on a row copies that user's full link."""
+    from ghosty_console.screens import devices_list
+    from ghosty_console.screens.devices_list import DevicesScreen
+    from textual.widgets import Static
+
+    copied = []
+    monkeypatch.setattr(devices_list, "copy_text", lambda text: copied.append(text) or True)
+    links = [("default", "vless://u-1@203.0.113.7:443?x=1#a"), ("Мой iPhone", "vless://u-2@203.0.113.7:443?x=1#b")]
+
+    async def scenario():
+        app = GhostyApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            app.push_screen(DevicesScreen("gmail", links))
+            await pilot.pause()
+            table = app.screen.query_one("#table", DataTable)
+            assert table.row_count == 2
+            await pilot.press("down")
+            await pilot.pause()
+            assert "u-2" in str(app.screen.query_one("#link", Static).render())
+            await pilot.press("enter")
+            await pilot.pause()
+            assert copied == [links[1][1]]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, DevicesScreen)
+
+    asyncio.run(scenario())

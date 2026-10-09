@@ -10,7 +10,7 @@
 # transparently proxied to the real $XRAY_SITE_NAME, so this provider has
 # no certbot/renewal story (unlike shadowsocks-xray).
 #
-# Usage: SERVER_IP=1.2.3.4 [PROXY_PORT=443] [XRAY_SITE_NAME=www.microsoft.com] ./install.sh
+# Usage: SERVER_IP=1.2.3.4 [PROXY_PORT=443] [XRAY_SITE_NAME=www.apple.com] ./install.sh
 # PROXY_PORT is only consulted on the very first install; once proxy.env
 # exists the port is fixed until the config is removed and reinstalled.
 # Note: Reality's camouflage works best on 443 (looks like normal HTTPS) -
@@ -31,7 +31,7 @@ log() { printf '\n>>> %s\n' "$1"; }
 log "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ufw fail2ban curl openssl
+apt-get install -y ufw fail2ban curl openssl python3
 
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
@@ -46,7 +46,11 @@ if [[ -f "${ENV_FILE}" ]]; then
   source "${ENV_FILE}"
 else
   XRAY_PORT="${PROXY_PORT:-$(( (RANDOM % 50000) + 10000 ))}"
-  XRAY_SITE="${XRAY_SITE_NAME:-www.microsoft.com}"
+  # The camouflage site must support TLS 1.3 + h2 and have a SMALL handshake:
+  # Reality buffers the site's whole server flight (~8 KB), and
+  # www.microsoft.com (8.2 KB certificate + post-quantum ServerHello) overflows
+  # it - authenticated clients then get "handshake did not complete".
+  XRAY_SITE="${XRAY_SITE_NAME:-www.apple.com}"
   cat > "${ENV_FILE}" <<EOF
 XRAY_PORT=${XRAY_PORT}
 XRAY_SITE=${XRAY_SITE}
@@ -61,10 +65,10 @@ docker build -t "${IMAGE_NAME}:latest" "${BUILD_DIR}"
 
 if [[ ! -f "${ENV_FILE}.keys" ]]; then
   log "Generating client id, keypair and short id (one-time)"
-  XRAY_CLIENT_ID=$(docker run --rm "${IMAGE_NAME}:latest" xray uuid)
+  XRAY_CLIENT_ID=$(docker run --rm --entrypoint xray "${IMAGE_NAME}:latest" uuid)
   XRAY_SHORT_ID=$(openssl rand -hex 8)
 
-  KEYPAIR=$(docker run --rm "${IMAGE_NAME}:latest" xray x25519)
+  KEYPAIR=$(docker run --rm --entrypoint xray "${IMAGE_NAME}:latest" x25519)
   XRAY_PRIVATE_KEY=$(printf '%s\n' "${KEYPAIR}" | sed -n 's/.*[Pp]rivate[ ]*[Kk]ey:[[:space:]]*//p' | head -1 | tr -d ' ')
   XRAY_PUBLIC_KEY=$(printf '%s\n' "${KEYPAIR}" | sed -n 's/.*(PublicKey):[[:space:]]*//p' | head -1 | tr -d ' ')
   if [[ -z "${XRAY_PUBLIC_KEY}" ]]; then
@@ -84,36 +88,10 @@ fi
 # shellcheck disable=SC1090
 source "${ENV_FILE}.keys"
 
-log "Writing Xray server inbound config (VLESS + TCP + Reality)"
-cat > "${PROXY_DIR}/server.json" <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "listen": "0.0.0.0",
-      "port": ${XRAY_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [ { "id": "${XRAY_CLIENT_ID}", "flow": "xtls-rprx-vision" } ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${XRAY_SITE}:443",
-          "xver": 0,
-          "serverNames": ["${XRAY_SITE}"],
-          "privateKey": "${XRAY_PRIVATE_KEY}",
-          "shortIds": ["${XRAY_SHORT_ID}"]
-        }
-      }
-    }
-  ],
-  "outbounds": [ { "protocol": "freedom" } ]
-}
-EOF
+log "Writing Xray server inbound config (VLESS + TCP + Reality) and client-info.json"
+# clients.py builds server.json from clients.json (one UUID per device; the
+# very first run turns the pre-existing client into the "default" device).
+SERVER_IP="${SERVER_IP}" PROXY_STATE_DIR="${PROXY_DIR}" python3 "$(dirname "$0")/clients.py" render
 
 log "Configuring UFW"
 ufw allow OpenSSH
@@ -136,25 +114,11 @@ docker run -d \
   -v "${PROXY_DIR}/server.json:/opt/amnezia/xray/server.json:ro" \
   --name "${CONTAINER_NAME}" "${IMAGE_NAME}:latest"
 
-cat > "${PROXY_DIR}/client-info.json" <<EOF
-{
-  "provider": "${PROVIDER}",
-  "ip": "${SERVER_IP}",
-  "port": ${XRAY_PORT},
-  "uuid": "${XRAY_CLIENT_ID}",
-  "public_key": "${XRAY_PUBLIC_KEY}",
-  "short_id": "${XRAY_SHORT_ID}",
-  "site_name": "${XRAY_SITE}",
-  "flow": "xtls-rprx-vision",
-  "fingerprint": "chrome"
-}
-EOF
-chmod 600 "${PROXY_DIR}/client-info.json"
-
 log "Setup report"
 cat <<EOF
 Protocol         : VLESS + TCP + Reality (Xray-core ${IMAGE_NAME})
 Port             : ${XRAY_PORT}
 Camouflage site  : ${XRAY_SITE} (Reality dest - no certificate of our own, nothing to renew)
+Devices          : manage with clients.sh add|remove|list (one UUID per device)
 Client info      : ${PROXY_DIR}/client-info.json (fetch this file to generate the client profile)
 EOF

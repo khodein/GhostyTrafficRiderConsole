@@ -11,6 +11,9 @@ reported through an on_line(str) callback.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -22,6 +25,9 @@ from ghosty_console.ssh_client import SSHSession, OnLine
 
 REMOTE_SCRIPTS_ROOT = "/opt/proxy-scripts"
 REMOTE_STATE_ROOT = "/opt/proxy"
+# Same rule as clients.py on the server: letters (any language), digits,
+# space, "_", "-", "."; no leading/trailing space.
+DEVICE_NAME_RE = re.compile(r"^(?!\s)[\w .-]{1,32}(?<!\s)$")
 
 
 def _provider_dir(provider: str) -> Path:
@@ -61,6 +67,22 @@ def _remote_state_dir(provider: str) -> str:
     return f"{REMOTE_STATE_ROOT}/{provider}"
 
 
+def _upload_remote_files(ssh: SSHSession, provider: str, on_line: OnLine) -> None:
+    """Uploads every file of the provider's remote/ directory to the VPS
+    (creating the target directory first).
+
+    Args:
+        ssh: Already-connected SSH session to the server.
+        provider: Provider whose remote/ scripts to upload.
+        on_line: Callback invoked with each line of output.
+    """
+    remote_dir = _remote_scripts_dir(provider)
+    ssh.exec_stream(f"mkdir -p {remote_dir}", on_line)
+    for f in sorted((_provider_dir(provider) / "remote").iterdir()):
+        if f.is_file():
+            ssh.sftp_put(f, f"{remote_dir}/{f.name}")
+
+
 def deploy(
     profile: ServerProfile, provider: str, proxy_port: str, password: str | None, on_line: OnLine
 ) -> dict:
@@ -86,17 +108,13 @@ def deploy(
     Raises:
         RuntimeError: If install.sh exits with a non-zero status.
     """
-    provider_dir = _provider_dir(provider)
     remote_dir = _remote_scripts_dir(provider)
     state_dir = _remote_state_dir(provider)
 
     with SSHSession(profile, password) as ssh:
         on_line(f"[connected to {profile.host}]")
 
-        ssh.exec_stream(f"mkdir -p {remote_dir}", on_line)
-        for f in sorted((provider_dir / "remote").iterdir()):
-            if f.is_file():
-                ssh.sftp_put(f, f"{remote_dir}/{f.name}")
+        _upload_remote_files(ssh, provider, on_line)
 
         port_env = f"PROXY_PORT={proxy_port} " if proxy_port else ""
         command = (
@@ -183,7 +201,7 @@ def _sync_proxy_state(
     _snapshot_remote_state(ssh, state_dir, snapshot)
 
     client_info = json.loads((snapshot / "client-info.json").read_text())
-    _generate_client_profile(snapshot / "client-info.json", on_line)
+    _generate_client_profile(snapshot / "client-info.json", on_line, profile.name)
     _promote_to_current(profile, provider, snapshot)
     return client_info
 
@@ -216,7 +234,7 @@ def _snapshot_remote_state(ssh: SSHSession, state_dir: str, snapshot: Path) -> N
             pass
 
 
-def _generate_client_profile(client_info_file: Path, on_line: OnLine) -> None:
+def _generate_client_profile(client_info_file: Path, on_line: OnLine, server_label: str = "") -> None:
     """Runs proxy-scripts/generate-config.sh against a client-info.json to
     (re)build the client-facing profile (Clash YAML / share link) in
     proxy-scripts/output/.
@@ -225,6 +243,8 @@ def _generate_client_profile(client_info_file: Path, on_line: OnLine) -> None:
         client_info_file: Path to the client-info.json to generate from.
         on_line: Callback invoked with each line of the script's stdout
             (and stderr, if it fails).
+        server_label: The server's name in the console; generate-config.sh
+            puts it into share-link titles ("<server> · <device>").
 
     Raises:
         RuntimeError: If generate-config.sh exits with a non-zero status.
@@ -233,6 +253,7 @@ def _generate_client_profile(client_info_file: Path, on_line: OnLine) -> None:
         [str(PROXY_SCRIPTS_DIR / "generate-config.sh"), str(client_info_file)],
         capture_output=True,
         text=True,
+        env={**os.environ, "SERVER_LABEL": server_label},
     )
     for line in result.stdout.splitlines():
         on_line(line)
@@ -381,7 +402,7 @@ def rollback(
         if status != 0:
             raise RuntimeError(f"container restart exited with status {status}")
 
-    _generate_client_profile(info_file, on_line)
+    _generate_client_profile(info_file, on_line, profile.name)
     _promote_to_current(profile, provider, snapshot)
     on_line(f"[rollback complete, now running {snapshot_name}]")
     return json.loads(info_file.read_text())
@@ -436,7 +457,7 @@ def regenerate_config(profile: ServerProfile, provider: str, password: str | Non
     info_file = profile.proxy_current_dir(provider) / "client-info.json"
     if info_file.exists():
         on_line("[using locally cached client-info.json - no SSH needed]")
-        _generate_client_profile(info_file, on_line)
+        _generate_client_profile(info_file, on_line, profile.name)
         return str(info_file)
 
     on_line("[no local client-info.json found - fetching it from the server]")
@@ -472,3 +493,170 @@ def verify(profile: ServerProfile, provider: str, on_line: OnLine) -> bool:
     for line in (result.stdout + result.stderr).splitlines():
         on_line(line)
     return result.returncode == 0
+
+
+def supports_devices(provider: str) -> bool:
+    """Whether a provider can issue a separate key per device (i.e. ships
+    remote/clients.sh).
+
+    Args:
+        provider: Provider name, e.g. "xray-reality".
+
+    Returns:
+        True if the provider has a remote/clients.sh.
+    """
+    return (_provider_dir(provider) / "remote" / "clients.sh").exists()
+
+
+def list_devices(profile: ServerProfile, provider: str) -> list[str]:
+    """Device names of a proxy, from the locally cached client-info.json
+    (no SSH). A proxy deployed before per-device keys existed has just
+    one device, "default".
+
+    Args:
+        profile: Server the proxy belongs to.
+        provider: Provider name of the proxy.
+
+    Returns:
+        Device names in server order; empty if there is no local state yet.
+    """
+    info = load_current_client_info(profile, provider)
+    if not info:
+        return []
+    clients = info.get("clients")
+    return [c["name"] for c in clients] if clients else ["default"]
+
+
+def list_device_links(profile: ServerProfile, provider: str) -> list[tuple[str, str]]:
+    """Share links of all devices of a proxy, built from the locally cached
+    client-info.json (no SSH), by running the provider's generate-config.sh.
+
+    Args:
+        profile: Server the proxy belongs to.
+        provider: Provider name of the proxy.
+
+    Returns:
+        (device name, share link) pairs in server order; empty if there is no
+        local state yet.
+    """
+    info_file = profile.proxy_current_dir(provider) / "client-info.json"
+    if not info_file.exists():
+        return []
+    lines: list[str] = []
+    _generate_client_profile(info_file, lines.append, profile.name)
+    pairs = []
+    for i, line in enumerate(lines[:-1]):
+        if line.startswith("[") and line.endswith("]") and "://" in lines[i + 1]:
+            pairs.append((line[1:-1], lines[i + 1]))
+    return pairs
+
+
+def add_device(
+    profile: ServerProfile, provider: str, name: str, password: str | None, on_line: OnLine
+) -> dict:
+    """Issues a new key for one more device and refreshes the links.
+
+    Args:
+        profile: Server to connect to.
+        provider: Provider name of the proxy; must support devices.
+        name: New device name (1-32 chars of A-Z a-z 0-9 _ -).
+        password: SSH password, or None if the server uses a key.
+        on_line: Callback invoked with each line of progress/output,
+            including the generated share links.
+
+    Returns:
+        The refreshed client-info.json.
+
+    Raises:
+        ValueError: If name is not a valid device name.
+        RuntimeError: If the remote clients.sh fails (e.g. duplicate name).
+    """
+    return _change_device(profile, provider, "add", [name], password, on_line)
+
+
+def remove_device(
+    profile: ServerProfile, provider: str, name: str, password: str | None, on_line: OnLine
+) -> dict:
+    """Revokes one device's key; the other devices' links stay valid.
+
+    Args:
+        profile: Server to connect to.
+        provider: Provider name of the proxy; must support devices.
+        name: Name of the device to remove.
+        password: SSH password, or None if the server uses a key.
+        on_line: Callback invoked with each line of progress/output.
+
+    Returns:
+        The refreshed client-info.json.
+
+    Raises:
+        ValueError: If name is not a valid device name.
+        RuntimeError: If the remote clients.sh fails (unknown device, or
+            it is the last one).
+    """
+    return _change_device(profile, provider, "remove", [name], password, on_line)
+
+
+def rename_device(
+    profile: ServerProfile, provider: str, old_name: str, new_name: str, password: str | None, on_line: OnLine
+) -> dict:
+    """Renames a device. Only the label in the share link changes: the key
+    (UUID) stays, so the link already imported on that device keeps working.
+
+    Args:
+        profile: Server to connect to.
+        provider: Provider name of the proxy; must support devices.
+        old_name: Current device name.
+        new_name: New device name (same rules as add_device()).
+        password: SSH password, or None if the server uses a key.
+        on_line: Callback invoked with each line of progress/output,
+            including the regenerated share links.
+
+    Returns:
+        The refreshed client-info.json.
+
+    Raises:
+        ValueError: If either name is not a valid device name.
+        RuntimeError: If the remote clients.sh fails (unknown device, or
+            the new name is already taken).
+    """
+    return _change_device(profile, provider, "rename", [old_name, new_name], password, on_line)
+
+
+def _change_device(
+    profile: ServerProfile, provider: str, action: str, names: list[str], password: str | None, on_line: OnLine
+) -> dict:
+    """Shared body of add_device()/remove_device()/rename_device(): uploads
+    the provider's scripts (so proxies deployed earlier work without a
+    re-Deploy), runs clients.sh <action> <names> on the server, then pulls
+    the new state and regenerates the links.
+
+    Args:
+        profile: Server to connect to.
+        provider: Provider name of the proxy.
+        action: "add", "remove" or "rename".
+        names: Device name(s) the action takes (one, or old and new for rename).
+        password: SSH password, or None if the server uses a key.
+        on_line: Callback invoked with each line of progress/output.
+
+    Returns:
+        The refreshed client-info.json.
+    """
+    for name in names:
+        if not DEVICE_NAME_RE.match(name):
+            raise ValueError("device name must be 1-32 chars: letters, digits, space, _ - .")
+
+    remote_dir = _remote_scripts_dir(provider)
+    state_dir = _remote_state_dir(provider)
+    quoted = " ".join(shlex.quote(n) for n in names)
+    with SSHSession(profile, password) as ssh:
+        on_line(f"[connected to {profile.host}]")
+        _upload_remote_files(ssh, provider, on_line)
+        status = ssh.exec_stream(
+            f"chmod +x {remote_dir}/*.sh 2>/dev/null; "
+            f"SERVER_IP={profile.host} {remote_dir}/clients.sh {action} {quoted}",
+            on_line,
+        )
+        if status != 0:
+            raise RuntimeError(f"remote clients.sh {action} exited with status {status}")
+        return _sync_proxy_state(ssh, profile, provider, state_dir, on_line)

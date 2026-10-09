@@ -9,6 +9,9 @@ from textual.widgets import Button, Footer, Header, RichLog
 
 from ghosty_console import deploy
 from ghosty_console.config import ServerProfile, list_proxy_snapshots, remove_proxy
+from ghosty_console.screens.devices_list import DevicesScreen
+from ghosty_console.screens.device_name_prompt import DeviceNamePromptScreen
+from ghosty_console.screens.device_picker import DevicePickerScreen
 from ghosty_console.screens.password_prompt import PasswordPromptScreen
 from ghosty_console.screens.rollback_picker import RollbackPickerScreen
 
@@ -38,6 +41,11 @@ class ProxyDetailScreen(Screen):
         with Horizontal(id="actions"):
             yield Button("Deploy", id="deploy", variant="primary")
             yield Button("Regenerate config", id="regenerate")
+            if deploy.supports_devices(self.provider):
+                yield Button("Devices", id="devices")
+                yield Button("Add device", id="add_device")
+                yield Button("Rename device", id="rename_device")
+                yield Button("Remove device", id="remove_device")
             yield Button("Ping", id="ping")
             yield Button("Verify", id="verify")
             yield Button("Status / Logs", id="status")
@@ -68,8 +76,9 @@ class ProxyDetailScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Dispatches the action bar's buttons: Back, Delete proxy, Ping,
-        Verify, Rollback, Regenerate config, Deploy, Status/Logs, Remove
-        config.
+        Verify, Rollback, Regenerate config, Devices (window with every
+        user's link), Add/Rename/Remove device, Deploy,
+        Status/Logs, Remove config.
 
         Args:
             event: The button-press message; event.button.id identifies
@@ -95,6 +104,18 @@ class ProxyDetailScreen(Screen):
             return
         if button_id == "regenerate":
             self._start_regenerate_flow()
+            return
+        if button_id == "devices":
+            self._show_devices()
+            return
+        if button_id == "add_device":
+            self._start_add_device_flow()
+            return
+        if button_id == "rename_device":
+            self._start_rename_device_flow()
+            return
+        if button_id == "remove_device":
+            self._start_remove_device_flow()
             return
         if button_id == "deploy":
             self._start_password_flow(self.run_deploy)
@@ -160,6 +181,139 @@ class ProxyDetailScreen(Screen):
             return
         self.run_regenerate(password)
 
+    def _show_devices(self) -> None:
+        """Opens the window listing every user of this proxy with its link
+        (built from the local client-info.json - no SSH, no password)."""
+        links = deploy.list_device_links(self.profile, self.provider)
+        if not links:
+            self.write_log("[no local state yet - run Deploy or Regenerate config first]")
+            return
+        self.app.push_screen(DevicesScreen(self.profile.name, links))
+
+    @work()
+    async def _start_add_device_flow(self) -> None:
+        """Asks for the new device's name, then for a password if needed,
+        then starts the add-device worker. Cancelling either step aborts
+        cleanly with no side effects."""
+        name = await self.app.push_screen_wait(
+            DeviceNamePromptScreen("New device name, e.g. My iPhone (up to 32 chars)")
+        )
+        if not name:
+            return
+        password = await self._maybe_prompt_password()
+        if password is None and not self.profile.uses_key:
+            self.write_log("[cancelled - no password entered]")
+            return
+        self.run_add_device(password, name)
+
+    @work()
+    async def _start_rename_device_flow(self) -> None:
+        """Shows the device picker, asks for the new name, then prompts for
+        a password if needed, then starts the rename worker. Cancelling any
+        step aborts cleanly with no side effects."""
+        old_name = await self.app.push_screen_wait(
+            DevicePickerScreen(
+                deploy.list_devices(self.profile, self.provider),
+                "Pick a device to rename (its key and link keep working):",
+            )
+        )
+        if not old_name:
+            return
+        new_name = await self.app.push_screen_wait(
+            DeviceNamePromptScreen("New name for this device (up to 32 chars)", "Rename", old_name)
+        )
+        if not new_name or new_name == old_name:
+            return
+        password = await self._maybe_prompt_password()
+        if password is None and not self.profile.uses_key:
+            self.write_log("[cancelled - no password entered]")
+            return
+        self.run_rename_device(password, old_name, new_name)
+
+    @work(thread=True, exclusive=True, group="ssh")
+    def run_rename_device(self, password: str | None, old_name: str, new_name: str) -> None:
+        """Background worker: renames a device and prints the refreshed links.
+
+        Args:
+            password: SSH password, or None if the server uses a key.
+            old_name: Current device name.
+            new_name: New device name.
+        """
+        try:
+            deploy.rename_device(
+                self.profile,
+                self.provider,
+                old_name,
+                new_name,
+                password,
+                lambda line: self.app.call_from_thread(self.write_log, line),
+            )
+            self.app.call_from_thread(
+                self.write_log, f"[OK] '{old_name}' renamed to '{new_name}' - re-import the link to see the new title"
+            )
+        except Exception as exc:
+            self.app.call_from_thread(self.write_log, f"[ERROR] {exc}")
+
+    @work()
+    async def _start_remove_device_flow(self) -> None:
+        """Shows the device picker, then prompts for a password if needed,
+        then starts the remove-device worker. Cancelling either step
+        aborts cleanly with no side effects."""
+        name = await self.app.push_screen_wait(
+            DevicePickerScreen(
+                deploy.list_devices(self.profile, self.provider),
+                "Pick a device to remove (its key stops working):",
+            )
+        )
+        if not name:
+            return
+        password = await self._maybe_prompt_password()
+        if password is None and not self.profile.uses_key:
+            self.write_log("[cancelled - no password entered]")
+            return
+        self.run_remove_device(password, name)
+
+    @work(thread=True, exclusive=True, group="ssh")
+    def run_add_device(self, password: str | None, name: str) -> None:
+        """Background worker: issues a new key for one more device and
+        prints the refreshed links.
+
+        Args:
+            password: SSH password, or None if the server uses a key.
+            name: Name of the new device.
+        """
+        try:
+            deploy.add_device(
+                self.profile,
+                self.provider,
+                name,
+                password,
+                lambda line: self.app.call_from_thread(self.write_log, line),
+            )
+            self.app.call_from_thread(self.write_log, f"[OK] device '{name}' added - import its link above")
+        except Exception as exc:
+            self.app.call_from_thread(self.write_log, f"[ERROR] {exc}")
+
+    @work(thread=True, exclusive=True, group="ssh")
+    def run_remove_device(self, password: str | None, name: str) -> None:
+        """Background worker: revokes one device's key.
+
+        Args:
+            password: SSH password, or None if the server uses a key.
+            name: Name of the device to remove.
+        """
+        try:
+            deploy.remove_device(
+                self.profile,
+                self.provider,
+                name,
+                password,
+                lambda line: self.app.call_from_thread(self.write_log, line),
+            )
+            self.app.call_from_thread(self.write_log, f"[OK] device '{name}' removed")
+        except Exception as exc:
+            self.app.call_from_thread(self.write_log, f"[ERROR] {exc}")
+
     @work(thread=True, exclusive=True, group="ssh")
     def run_regenerate(self, password: str | None) -> None:
         """Background worker: rebuilds this proxy's client profile.
@@ -176,7 +330,7 @@ class ProxyDetailScreen(Screen):
                 lambda line: self.app.call_from_thread(self.write_log, line),
             )
             self.app.call_from_thread(
-                self.write_log, f"[OK] client-info at {path}, profile written to proxy-scripts/output/"
+                self.write_log, f"[OK] client-info at {path}, profile written to proxy-scripts/output/{self.provider}/"
             )
         except Exception as exc:
             self.app.call_from_thread(self.write_log, f"[ERROR] {exc}")

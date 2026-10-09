@@ -8,20 +8,20 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Label, ListItem, ListView
 
 
-class RollbackPickerScreen(ModalScreen[Optional[str]]):
-    """Lets the user pick which past snapshot to roll a proxy back to.
+class DevicePickerScreen(ModalScreen[Optional[str]]):
+    """Lets the user pick one of the proxy's devices (to remove or rename).
 
     Args:
-        snapshots: Snapshot names to offer, newest-first (as returned by
-            config.list_proxy_snapshots()). May be empty.
+        devices: Device names to offer (from deploy.list_devices()). May be empty.
+        title: Prompt shown above the list.
 
     Dismisses with:
-        The chosen snapshot name, or None if cancelled (or if there was
+        The chosen device name, or None if cancelled (or if there was
         nothing to pick from).
     """
 
     DEFAULT_CSS = """
-    RollbackPickerScreen {
+    DevicePickerScreen {
         align: center middle;
     }
     #dialog {
@@ -33,26 +33,27 @@ class RollbackPickerScreen(ModalScreen[Optional[str]]):
     }
     """
 
-    def __init__(self, snapshots: list[str]) -> None:
+    def __init__(self, devices: list[str], title: str = "Pick a device:") -> None:
         super().__init__()
-        self._snapshots = snapshots
+        self._devices = devices
+        self._title = title
 
     def compose(self) -> ComposeResult:
-        """Builds the list of snapshots (or a fallback message if there are none) + Cancel button."""
+        """Builds the list of devices (or a fallback message if there are none) + Cancel button."""
         with Vertical(id="dialog"):
-            if self._snapshots:
-                yield Label("Pick a snapshot to roll back to:")
-                yield ListView(*[ListItem(Label(s), name=s) for s in self._snapshots])
+            if self._devices:
+                yield Label(self._title)
+                yield ListView(*[ListItem(Label(d), name=d) for d in self._devices])
             else:
-                yield Label("No snapshots yet - deploy at least once first.")
+                yield Label("No devices yet - deploy or Regenerate config first.")
             yield Button("Cancel", id="cancel")
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Dismisses with the snapshot name of the selected list item.
+        """Dismisses with the name of the selected list item.
 
         Args:
             event: The list-selection message; event.item is the selected
-                ListItem, whose name is the snapshot name.
+                ListItem, whose name is the device name.
         """
         self.dismiss(event.item.name)
 

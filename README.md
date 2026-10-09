@@ -88,6 +88,22 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   share-ссылку), если потерял или забыл. Если `client-info.json` ещё
   лежит локально — работает мгновенно, без SSH и пароля. Если нет —
   сама подключается по SSH и подтягивает его заново с сервера.
+- **Devices / Add device / Rename device / Remove device** — только у
+  провайдеров с `remote/clients.sh` (сейчас `xray-reality`). У каждого
+  устройства свой ключ (UUID) и своя ссылка: **Devices** открывает окно со
+  всеми пользователями и их ссылками (стрелки — выбор, подсказка с полной
+  ссылкой, `Enter` — скопировать ссылку в буфер обмена, `Esc` — закрыть; SSH
+  не нужен), **Add device** спрашивает имя (до 32 символов: буквы любого
+  языка, цифры, пробел, `_ - .`, например `Мой iPhone`) и выдаёт новую
+  ссылку, **Rename device** меняет только название (UUID остаётся — уже
+  импортированная ссылка продолжает работать), **Remove device** отзывает ключ
+  только этого устройства — остальные ссылки работают. Название профиля в
+  клиенте (Hiddify и др.) — `<имя сервера в консоли> · <устройство>`, например
+  `gmail · Мой iPhone`; это подпись после `#` в ссылке, подключение от неё не
+  зависит. Add/Remove перезапускают контейнер (соединения рвутся на 1–2
+  секунды), Rename — нет; порт и ключи Reality не меняются. Прокси,
+  развёрнутый до появления устройств, получает устройство `default` с прежним
+  UUID — уже выданная ссылка остаётся рабочей, переимпортировать её не нужно.
 - **Ping** — TCP-проверка SSH-порта и порта этого прокси (без SSH-логина).
 - **Verify** — внешняя проверка последнего деплоя (без SSH — просто
   дёргает `proxy-scripts/verify.sh` локально с сохранённым client-info).
@@ -132,7 +148,7 @@ proxy-scripts/
   deploy.sh              # универсальный: --provider <name> --host <ip>
   generate-config.sh      # универсальный диспетчер
   verify.sh                # универсальный диспетчер
-  output/                  # куда deploy.sh кладёт client-info.json и профили
+  output/<провайдер>/      # всё сгенерированное: <ip>.yaml / <ip>.txt (ссылки), <ip>-client-info.json
   providers/
     shadowsocks-xray/
       remote/install.sh          # ставится и запускается на VPS
@@ -143,6 +159,8 @@ proxy-scripts/
       verify.sh
     xray-reality/
       remote/install.sh
+      remote/clients.sh          # list|add|remove|rename устройств (ключ на устройство) + перезапуск контейнера
+      remote/clients.py          # логика clients.sh и рендер server.json / client-info.json
       remote/Dockerfile
       remote/start.sh
       templates/clash-vless.yaml.tmpl
@@ -181,6 +199,9 @@ proxy-scripts/generate-config.sh <client-info.json>
   на этом держатся Status/Rollback/Remove в TUI.
 - **`remote/*`** — любые другие файлы, нужные на сервере (Dockerfile,
   доп. скрипты) — всё из `remote/` заливается на VPS целиком.
+- **`remote/clients.sh`** — опционально. Если есть, в карточке прокси
+  появляются кнопки Devices / Add device / Remove device; `client-info.json`
+  при этом содержит список `"clients": [{"name", "uuid"}]`.
 - **`remote/status-extra.sh`** — опционально. Если есть, TUI запускает
   его в Status/Logs в дополнение к `docker ps`/`docker logs`.
 - **`generate-config.sh <client-info.json> [output]`** — обязателен.
@@ -246,7 +267,9 @@ VLESS + TCP + Reality на Xray-core. Адаптация протокольны�
 
 Особенность Reality: своего сертификата нет — нераспознанные TLS-запросы
 прозрачно проксируются на настоящий "сайт-маскировку" (по умолчанию
-`www.microsoft.com`, задаётся через `XRAY_SITE_NAME`). Поэтому у этого
+`www.apple.com`, задаётся через `XRAY_SITE_NAME`; сайт должен поддерживать
+TLS 1.3 и h2 и иметь небольшой handshake — `www.microsoft.com` не подходит:
+его сертификат ~8 КБ не помещается в буфер Reality). Поэтому у этого
 провайдера нет certbot/таймера продления, а `verify.sh` проверяет не
 сертификат, а то, что маскировка TLS отдаёт настоящий сертификат
 указанного сайта — сам VLESS-хендшейк без реального клиента не проверить.
@@ -257,6 +280,18 @@ Reality — маскировка под обычный HTTPS-трафик на �
 на случайном высоком порту эта маскировка частично теряется — сервис
 выглядит как "что-то на порту 47231", а не как обычный сайт.
 
+### Ссылки для VPN-клиентов (Hiddify и др.)
+`xray-reality` кроме Clash YAML формирует `vless://…security=reality…` —
+по одной ссылке на каждое устройство (понимают Hiddify, v2rayN, v2rayNG,
+Streisand, Karing и др.). Название профиля: `<сервер> · <устройство>`. Ссылки сохраняются в
+`proxy-scripts/output/xray-reality/<ip>.txt` и печатаются в лог Deploy /
+Regenerate config. Достаточно скопировать строку со ссылкой и добавить её
+в клиент через «импорт из буфера».
+
+`shadowsocks-xray` отдаёт только Clash YAML для Clash Verge: его
+`v2ray-plugin` не понимают клиенты на sing-box (Hiddify и др. — ошибка
+`plugin not found: v2ray-plugin`), поэтому share-ссылки для него нет.
+
 ### `mtproxy`
 MTProto-прокси для Telegram в режиме FakeTLS (Docker-контейнер с
 `mtproto-proxy`).
@@ -264,7 +299,7 @@ MTProto-прокси для Telegram в режиме FakeTLS (Docker-конте�
 Вместо Clash-профиля отдаёт **ключ для подключения** — ссылки
 `tg://proxy?server=…&port=…&secret=ee…` и `https://t.me/proxy?…`.
 Они печатаются в лог (Deploy / Regenerate config) и сохраняются в
-`proxy-scripts/output/mtproxy-<ip>.txt`. Ссылку достаточно открыть в
+`proxy-scripts/output/mtproxy/<ip>.txt`. Ссылку достаточно открыть в
 Telegram.
 
 FakeTLS: домен-маскировка (по умолчанию `www.microsoft.com`, задаётся через

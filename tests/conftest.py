@@ -40,13 +40,24 @@ def _clean_generated_output():
     """generate-config.sh (real subprocess, not faked) always writes into
     proxy-scripts/output/ - the one thing tests can't redirect via
     isolated_config, since that path is baked into the provider scripts.
-    Deletes whatever a test added there so the repo's output/ directory
-    doesn't accumulate test artifacts."""
+    Deletes whatever a test added there (files and the per-provider
+    subdirectories created for them) so the repo's output/ directory doesn't
+    accumulate test artifacts."""
     from ghosty_console.config import PROXY_SCRIPTS_DIR
 
     output_dir = PROXY_SCRIPTS_DIR / "output"
-    before = set(output_dir.glob("*")) if output_dir.exists() else set()
+
+    def snapshot():
+        paths = list(output_dir.rglob("*")) if output_dir.exists() else []
+        return {p for p in paths if p.is_file()}, {p for p in paths if p.is_dir()}
+
+    files_before, dirs_before = snapshot()
     yield
-    after = set(output_dir.glob("*")) if output_dir.exists() else set()
-    for path in after - before:
+    files_after, dirs_after = snapshot()
+    for path in files_after - files_before:
         path.unlink(missing_ok=True)
+    for path in sorted(dirs_after - dirs_before, reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            pass

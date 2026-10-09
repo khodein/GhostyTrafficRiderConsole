@@ -73,8 +73,8 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${HOST}" \
   "chmod +x ${REMOTE_DIR}/*.sh && SERVER_IP=${HOST} ${PORT_ENV} ${REMOTE_DIR}/install.sh"
 
 echo ">>> Fetching client-info.json"
-mkdir -p "${SCRIPT_DIR}/output"
-INFO_FILE="${SCRIPT_DIR}/output/${PROVIDER}-${HOST}-client-info.json"
+mkdir -p "${SCRIPT_DIR}/output/${PROVIDER}"
+INFO_FILE="${SCRIPT_DIR}/output/${PROVIDER}/${HOST}-client-info.json"
 scp "${SSH_OPTS[@]}" "${SSH_USER}@${HOST}:/opt/proxy/${PROVIDER}/client-info.json" "${INFO_FILE}"
 
 echo ">>> Generating client profile"

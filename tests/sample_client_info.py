@@ -20,7 +20,15 @@ XRAY_REALITY_INFO = {
     "uuid": "11111111-2222-3333-4444-555555555555",
     "public_key": "AbCdEf1234567890abcdef1234567890abcdef1234567890a",
     "short_id": "0123456789abcdef",
-    "site_name": "www.microsoft.com",
+    "site_name": "www.apple.com",
     "flow": "xtls-rprx-vision",
     "fingerprint": "chrome",
+}
+
+XRAY_REALITY_MULTI_INFO = {
+    **XRAY_REALITY_INFO,
+    "clients": [
+        {"name": "default", "uuid": "11111111-2222-3333-4444-555555555555"},
+        {"name": "iphone", "uuid": "66666666-7777-8888-9999-000000000000"},
+    ],
 }

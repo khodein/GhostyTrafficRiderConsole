@@ -15,7 +15,7 @@ DOMAIN=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['domain
 PORT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['port'])" "${INFO_FILE}")
 PASSWORD=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['password'])" "${INFO_FILE}")
 
-OUTPUT="${2:-${PROXY_SCRIPTS_DIR}/output/shadowsocks-xray-${IP}.yaml}"
+OUTPUT="${2:-${PROXY_SCRIPTS_DIR}/output/shadowsocks-xray/${IP}.yaml}"
 mkdir -p "$(dirname "${OUTPUT}")"
 
 sed \

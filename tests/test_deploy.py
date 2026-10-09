@@ -20,7 +20,9 @@ import json
 from ghosty_console import deploy as deploy_mod
 from ghosty_console.config import ServerProfile, add_server, list_proxies
 from tests.fakes import make_fake_ssh_session
-from tests.sample_client_info import SHADOWSOCKS_XRAY_INFO, XRAY_REALITY_INFO
+import pytest
+
+from tests.sample_client_info import SHADOWSOCKS_XRAY_INFO, XRAY_REALITY_INFO, XRAY_REALITY_MULTI_INFO
 
 
 def _remote_info_path(provider: str) -> str:
@@ -172,3 +174,164 @@ def test_regenerate_config_falls_back_to_ssh_when_cache_missing(isolated_config,
     assert any("fetching it from the server" in line for line in lines)
     stored = json.loads((profile.proxy_current_dir("shadowsocks-xray") / "client-info.json").read_text())
     assert stored == SHADOWSOCKS_XRAY_INFO
+
+
+def test_supports_devices_only_for_providers_with_clients_script():
+    """Per-device keys are offered only where the provider ships remote/clients.sh."""
+    assert deploy_mod.supports_devices("xray-reality")
+    assert not deploy_mod.supports_devices("shadowsocks-xray")
+
+
+def test_list_devices_reads_local_state_and_falls_back_to_default(isolated_config):
+    """list_devices() needs no SSH: it reads "clients" from the cached
+    client-info.json, and reports the single device "default" for a proxy
+    deployed before per-device keys existed."""
+    profile = ServerProfile(name="devices", host="203.0.113.60")
+    add_server(profile)
+    assert deploy_mod.list_devices(profile, "xray-reality") == []
+
+    current = profile.proxy_current_dir("xray-reality")
+    current.mkdir(parents=True)
+    (current / "client-info.json").write_text(json.dumps(XRAY_REALITY_INFO))
+    assert deploy_mod.list_devices(profile, "xray-reality") == ["default"]
+
+    (current / "client-info.json").write_text(json.dumps(XRAY_REALITY_MULTI_INFO))
+    assert deploy_mod.list_devices(profile, "xray-reality") == ["default", "iphone"]
+
+
+def test_add_device_runs_clients_script_and_syncs_links(isolated_config, monkeypatch):
+    """add_device() uploads the scripts, runs clients.sh add <name> on the
+    server, then pulls the refreshed client-info.json and prints one link per device."""
+    profile = ServerProfile(name="add-dev", host="203.0.113.61")
+    add_server(profile)
+
+    commands: list[str] = []
+
+    def on_command(command, on_line):
+        commands.append(command)
+        return None
+
+    remote_files = {_remote_info_path("xray-reality"): XRAY_REALITY_MULTI_INFO}
+    session = make_fake_ssh_session(remote_files, on_command)
+    monkeypatch.setattr(deploy_mod, "SSHSession", session)
+
+    lines: list[str] = []
+    info = deploy_mod.add_device(profile, "xray-reality", "iphone", None, lines.append)
+
+    assert info == XRAY_REALITY_MULTI_INFO
+    assert any("clients.sh add iphone" in c for c in commands)
+    assert any(remote.endswith("/xray-reality/clients.sh") for _, remote in session.put_files)
+    assert "[iphone]" in lines
+    assert lines[lines.index("[iphone]") + 1].startswith("vless://")
+    assert deploy_mod.list_devices(profile, "xray-reality") == ["default", "iphone"]
+    # the share-link title carries the server's name in the console: "<server> · <device>"
+    saved = (deploy_mod.PROXY_SCRIPTS_DIR / "output" / "xray-reality" / "203.0.113.7.txt").read_text()
+    assert saved.splitlines()[0].endswith("#add-dev%20%C2%B7%20default")
+
+
+def test_remove_device_runs_clients_script(isolated_config, monkeypatch):
+    """remove_device() runs clients.sh remove <name> on the server."""
+    profile = ServerProfile(name="rm-dev", host="203.0.113.62")
+    add_server(profile)
+
+    commands: list[str] = []
+
+    def on_command(command, on_line):
+        commands.append(command)
+        return None
+
+    remote_files = {_remote_info_path("xray-reality"): XRAY_REALITY_INFO}
+    monkeypatch.setattr(deploy_mod, "SSHSession", make_fake_ssh_session(remote_files, on_command))
+
+    deploy_mod.remove_device(profile, "xray-reality", "iphone", None, lambda line: None)
+
+    assert any("clients.sh remove iphone" in c for c in commands)
+
+
+def test_add_device_rejects_bad_name_before_any_ssh(isolated_config, monkeypatch):
+    """A name that could be abused in a shell command is rejected locally;
+    no SSH session is ever opened."""
+    profile = ServerProfile(name="bad-name", host="203.0.113.63")
+    add_server(profile)
+
+    class ExplodingSSHSession:
+        def __init__(self, *a, **k):
+            raise AssertionError("SSHSession must not be constructed for an invalid name")
+
+    monkeypatch.setattr(deploy_mod, "SSHSession", ExplodingSSHSession)
+
+    with pytest.raises(ValueError):
+        deploy_mod.add_device(profile, "xray-reality", "x; rm -rf /", None, lambda line: None)
+
+
+def test_add_device_failure_on_server_raises(isolated_config, monkeypatch):
+    """A non-zero exit of clients.sh (e.g. duplicate name) surfaces as RuntimeError."""
+    profile = ServerProfile(name="dup-dev", host="203.0.113.64")
+    add_server(profile)
+
+    def on_command(command, on_line):
+        return 1 if "clients.sh" in command else None
+
+    monkeypatch.setattr(deploy_mod, "SSHSession", make_fake_ssh_session({}, on_command))
+
+    with pytest.raises(RuntimeError):
+        deploy_mod.add_device(profile, "xray-reality", "iphone", None, lambda line: None)
+
+
+def test_rename_device_runs_clients_script_with_both_names_quoted(isolated_config, monkeypatch):
+    """rename_device() passes the old and new name (shell-quoted, spaces and
+    non-Latin letters allowed) to clients.sh rename."""
+    profile = ServerProfile(name="ren-dev", host="203.0.113.65")
+    add_server(profile)
+
+    commands: list[str] = []
+
+    def on_command(command, on_line):
+        commands.append(command)
+        return None
+
+    remote_files = {_remote_info_path("xray-reality"): XRAY_REALITY_INFO}
+    monkeypatch.setattr(deploy_mod, "SSHSession", make_fake_ssh_session(remote_files, on_command))
+
+    deploy_mod.rename_device(profile, "xray-reality", "default", "Мой iPhone", None, lambda line: None)
+
+    assert any("clients.sh rename default 'Мой iPhone'" in c for c in commands)
+
+
+def test_rename_device_rejects_bad_new_name_before_any_ssh(isolated_config, monkeypatch):
+    """An invalid new name never reaches the server."""
+    profile = ServerProfile(name="ren-bad", host="203.0.113.66")
+    add_server(profile)
+
+    class ExplodingSSHSession:
+        def __init__(self, *a, **k):
+            raise AssertionError("SSHSession must not be constructed for an invalid name")
+
+    monkeypatch.setattr(deploy_mod, "SSHSession", ExplodingSSHSession)
+
+    with pytest.raises(ValueError):
+        deploy_mod.rename_device(profile, "xray-reality", "default", "a;b", None, lambda line: None)
+
+
+def test_list_device_links_builds_a_titled_link_per_user_without_ssh(isolated_config, monkeypatch):
+    """list_device_links() reads the cached client-info.json (no SSH) and
+    returns one (name, link) pair per user, titled "<server> · <user>"."""
+    profile = ServerProfile(name="links", host="203.0.113.70")
+    add_server(profile)
+    assert deploy_mod.list_device_links(profile, "xray-reality") == []
+
+    current = profile.proxy_current_dir("xray-reality")
+    current.mkdir(parents=True)
+    (current / "client-info.json").write_text(json.dumps(XRAY_REALITY_MULTI_INFO))
+
+    class ExplodingSSHSession:
+        def __init__(self, *a, **k):
+            raise AssertionError("no SSH expected")
+
+    monkeypatch.setattr(deploy_mod, "SSHSession", ExplodingSSHSession)
+
+    pairs = deploy_mod.list_device_links(profile, "xray-reality")
+
+    assert [name for name, _ in pairs] == ["default", "iphone"]
+    assert all(link.startswith("vless://") for _, link in pairs)
+    assert pairs[1][1].endswith("#links%20%C2%B7%20iphone")

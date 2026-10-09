@@ -16,7 +16,7 @@ IP=$(field ip)
 PORT=$(field port)
 SECRET=$(field faketls_secret)
 
-OUTPUT="${2:-${PROXY_SCRIPTS_DIR}/output/mtproxy-${IP}.txt}"
+OUTPUT="${2:-${PROXY_SCRIPTS_DIR}/output/mtproxy/${IP}.txt}"
 mkdir -p "$(dirname "${OUTPUT}")"
 
 TG_LINK="tg://proxy?server=${IP}&port=${PORT}&secret=${SECRET}"
